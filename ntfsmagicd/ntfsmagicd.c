@@ -613,57 +613,99 @@ static void handle_client(int client_fd) {
                 }
                 case NTFS_MSG_RENAME: {
                     struct ntfs_msg_rename_req *req = (struct ntfs_msg_rename_req *)payload;
+                    printf("[ntfsmagicd] RENAME: old_parent=%llu, new_parent=%llu\n", (unsigned long long)req->old_parent_ino, (unsigned long long)req->new_parent_ino);
+                    printf("[ntfsmagicd] RENAME: old_name='%s' (len=%zu), new_name='%s' (len=%zu)\n", req->old_name, strlen(req->old_name), req->new_name, strlen(req->new_name));
                     struct ntfs_msg_rename_resp resp;
                     memset(&resp, 0, sizeof(resp));
                     
-                    ntfs_inode *old_dir_ni = cache_get_inode(req->old_parent_ino);
-                    ntfs_inode *new_dir_ni = cache_get_inode(req->new_parent_ino);
-                    
-                    if (!old_dir_ni || !new_dir_ni) {
+                    ntfs_inode *lookup_dir = cache_get_inode(req->old_parent_ino);
+                    if (!lookup_dir) {
                         resp.status = -errno;
                     } else {
-                        u64 mref = ntfs_inode_lookup_by_mbsname(old_dir_ni, req->old_name);
+                        u64 mref = ntfs_inode_lookup_by_mbsname(lookup_dir, req->old_name);
                         if (mref == (u64)-1) {
                             resp.status = -ENOENT;
                         } else {
                             u64 ino = MREF(mref);
+                            // Evict all involved inodes from cache before modifying them
                             cache_evict(ino);
+                            cache_evict(req->old_parent_ino);
+                            cache_evict(req->new_parent_ino);
                             
                             ntfs_inode *ni = ntfs_inode_open(g_vol, ino);
                             if (!ni) {
                                 resp.status = -errno;
                             } else {
-                                ntfschar *new_uname = NULL;
-                                int new_uname_len = ntfs_mbstoucs(req->new_name, &new_uname);
-                                
-                                int r = ntfs_link(ni, new_dir_ni, new_uname, new_uname_len);
-                                free(new_uname);
-                                
-                                if (r < 0) {
-                                    resp.status = -errno;
-                                    ntfs_inode_close(ni);
-                                } else {
-                                    ntfs_inode *old_dir_ni_dup = ntfs_inode_open(g_vol, req->old_parent_ino);
-                                    if (!old_dir_ni_dup) {
+                                if (req->old_parent_ino == req->new_parent_ino) {
+                                    ntfs_inode *dir_ni = ntfs_inode_open(g_vol, req->old_parent_ino);
+                                    if (!dir_ni) {
                                         resp.status = -errno;
                                         ntfs_inode_close(ni);
                                     } else {
-                                        ntfschar *old_uname = NULL;
-                                        int old_uname_len = ntfs_mbstoucs(req->old_name, &old_uname);
-                                        r = ntfs_delete(g_vol, NULL, ni, old_dir_ni_dup, old_uname, old_uname_len);
-                                        free(old_uname);
+                                        ntfschar *new_uname = NULL;
+                                        int new_uname_len = ntfs_mbstoucs(req->new_name, &new_uname);
+                                        int r = ntfs_link(ni, dir_ni, new_uname, new_uname_len);
+                                        free(new_uname);
                                         
                                         if (r < 0) {
+                                            printf("[ntfsmagicd] ntfs_link failed: %d, errno=%d\n", r, errno);
                                             resp.status = -errno;
+                                            ntfs_inode_close(ni);
+                                            ntfs_inode_close(dir_ni);
                                         } else {
-                                            resp.status = 0;
+                                            ntfschar *old_uname = NULL;
+                                            int old_uname_len = ntfs_mbstoucs(req->old_name, &old_uname);
+                                            // ntfs_delete closes both ni and dir_ni
+                                            r = ntfs_delete(g_vol, NULL, ni, dir_ni, old_uname, old_uname_len);
+                                            free(old_uname);
+                                            
+                                            if (r < 0) {
+                                                printf("[ntfsmagicd] ntfs_delete failed: %d, errno=%d\n", r, errno);
+                                                resp.status = -errno;
+                                            } else {
+                                                resp.status = 0;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    ntfs_inode *new_dir_ni = ntfs_inode_open(g_vol, req->new_parent_ino);
+                                    ntfs_inode *old_dir_ni = ntfs_inode_open(g_vol, req->old_parent_ino);
+                                    if (!new_dir_ni || !old_dir_ni) {
+                                        resp.status = -errno;
+                                        if (new_dir_ni) ntfs_inode_close(new_dir_ni);
+                                        if (old_dir_ni) ntfs_inode_close(old_dir_ni);
+                                        ntfs_inode_close(ni);
+                                    } else {
+                                        ntfschar *new_uname = NULL;
+                                        int new_uname_len = ntfs_mbstoucs(req->new_name, &new_uname);
+                                        int r = ntfs_link(ni, new_dir_ni, new_uname, new_uname_len);
+                                        free(new_uname);
+                                        
+                                        if (r < 0) {
+                                            printf("[ntfsmagicd] ntfs_link (diff dir) failed: %d, errno=%d\n", r, errno);
+                                            resp.status = -errno;
+                                            ntfs_inode_close(ni);
+                                            ntfs_inode_close(new_dir_ni);
+                                            ntfs_inode_close(old_dir_ni);
+                                        } else {
+                                            ntfschar *old_uname = NULL;
+                                            int old_uname_len = ntfs_mbstoucs(req->old_name, &old_uname);
+                                            // ntfs_delete closes both ni and old_dir_ni
+                                            r = ntfs_delete(g_vol, NULL, ni, old_dir_ni, old_uname, old_uname_len);
+                                            free(old_uname);
+                                            
+                                            ntfs_inode_close(new_dir_ni);
+                                            if (r < 0) {
+                                                printf("[ntfsmagicd] ntfs_delete (diff dir) failed: %d, errno=%d\n", r, errno);
+                                                resp.status = -errno;
+                                            } else {
+                                                resp.status = 0;
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        cache_evict(req->old_parent_ino);
-                        cache_evict(req->new_parent_ino);
                     }
                     
                     struct ntfs_msg_header resp_hdr;
