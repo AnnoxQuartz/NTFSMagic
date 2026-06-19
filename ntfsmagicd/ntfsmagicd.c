@@ -8,15 +8,18 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <stddef.h>
 
 #include <ntfs-3g/volume.h>
 #include <ntfs-3g/inode.h>
 #include <ntfs-3g/dir.h>
+#include <ntfs-3g/reparse.h>
 #include <ntfs-3g/attrib.h>
 #include <ntfs-3g/unistr.h>
 #include <ntfs-3g/layout.h>
 #include <ntfs-3g/ntfstime.h>
 #include <ntfs-3g/cache.h>
+
 
 
 #include "ntfsmagicd.h"
@@ -307,6 +310,15 @@ static void handle_client(int client_fd) {
             
             if (g_vol) {
                 resp.status = -EBUSY;
+                resp.root_ino = 5;
+                resp.block_size = g_vol->cluster_size;
+                resp.total_blocks = g_vol->nr_clusters;
+                if (g_vol->free_clusters >= 0) {
+                    resp.free_blocks = g_vol->free_clusters;
+                } else {
+                    resp.free_blocks = g_vol->nr_clusters / 2;
+                }
+                strncpy(resp.shm_path, shm_path, sizeof(resp.shm_path) - 1);
             } else {
                 printf("[ntfsmagicd] Mounting device: %s\n", req->device);
                 // Try mount with recover flag
@@ -936,25 +948,17 @@ static void handle_client(int client_fd) {
                             if (uname) free(uname);
                             if (ulink) free(ulink);
                         } else {
-                            ntfs_inode *new_ni = ntfs_create(dir_ni, 0, uname, uname_len, S_IFLNK);
+                            ntfs_inode *new_ni = ntfs_create_symlink(dir_ni, 0, uname, uname_len, ulink, ulink_len);
                             free(uname);
+                            free(ulink);
                             
                             if (!new_ni) {
                                 resp.status = -errno;
-                                free(ulink);
                             } else {
-                                int bytes_written = ntfs_attr_data_write(new_ni, NULL, 0, (char *)ulink, ulink_len * sizeof(ntfschar), 0);
-                                free(ulink);
-                                
-                                if (bytes_written < 0) {
-                                    resp.status = -errno;
-                                    ntfs_delete(g_vol, NULL, new_ni, dir_ni, NULL, 0);
-                                } else {
-                                    lookup_cache_invalidate(g_vol, req->parent_ino, req->name);
-                                    resp.status = 0;
-                                    resp.ino = new_ni->mft_no;
-                                    ntfs_inode_close(new_ni);
-                                }
+                                lookup_cache_invalidate(g_vol, req->parent_ino, req->name);
+                                resp.status = 0;
+                                resp.ino = new_ni->mft_no;
+                                ntfs_inode_close(new_ni);
                             }
                         }
                         cache_evict(req->parent_ino);
@@ -978,20 +982,41 @@ static void handle_client(int client_fd) {
                     if (!ni) {
                         resp.status = -errno;
                     } else {
-                        ntfschar ulink[1024];
-                        int r = ntfs_attr_data_read(ni, NULL, 0, (char *)ulink, sizeof(ulink), 0);
-                        if (r < 0) {
-                            resp.status = -errno;
+                        char *target = NULL;
+                        if (ni->flags & FILE_ATTR_REPARSE_POINT) {
+                            target = ntfs_make_symlink(ni, "");
                         } else {
-                            char *mbs = NULL;
-                            int len = ntfs_ucstombs(ulink, r / sizeof(ntfschar), &mbs, 0);
-                            if (len < 0) {
-                                resp.status = -errno;
-                            } else {
-                                resp.status = 0;
-                                strncpy(resp.link_contents, mbs, sizeof(resp.link_contents) - 1);
-                                free(mbs);
+                            ntfs_attr *na = ntfs_attr_open(ni, AT_DATA, AT_UNNAMED, 0);
+                            if (na) {
+                                if (na->data_size > sizeof(INTX_FILE_TYPES)) {
+                                    INTX_FILE *intx_file = malloc(na->data_size);
+                                    if (intx_file) {
+                                        if (ntfs_attr_pread(na, 0, na->data_size, intx_file) == na->data_size) {
+                                            if (intx_file->magic == INTX_SYMBOLIC_LINK) {
+                                                int target_char_len = (na->data_size - offsetof(INTX_FILE, target)) / sizeof(ntfschar);
+                                                char *mbs = NULL;
+                                                int len = ntfs_ucstombs(intx_file->target, target_char_len, &mbs, 0);
+                                                if (len >= 0) {
+                                                    target = mbs;
+                                                }
+                                            }
+                                        }
+                                        free(intx_file);
+                                    }
+                                }
+                                ntfs_attr_close(na);
                             }
+                        }
+                        
+                        if (!target) {
+                            resp.status = -errno;
+                            if (resp.status == 0) {
+                                resp.status = -ENOENT;
+                            }
+                        } else {
+                            resp.status = 0;
+                            strncpy(resp.link_contents, target, sizeof(resp.link_contents) - 1);
+                            free(target);
                         }
                     }
                     

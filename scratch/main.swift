@@ -68,6 +68,19 @@ func runSanityTests(client: NTFSDaemonClient, rootIno: UInt64) {
             let status = unlinkRenamedResp.readInt32(at: 0)
             print("Cleanup: Unlink renamed_file.txt returned \(status)")
         }
+
+        var unlinkSymlinkPayload = Data()
+        var existingDirInoVarSym = existingDirIno
+        unlinkSymlinkPayload.append(Data(bytes: &existingDirInoVarSym, count: 8))
+        var namePaddingSymlink = "test_symlink"
+        if namePaddingSymlink.count < 256 {
+            namePaddingSymlink = namePaddingSymlink.padding(toLength: 256, withPad: "\0", startingAt: 0)
+        }
+        unlinkSymlinkPayload.append(namePaddingSymlink.data(using: .utf8)!.prefix(256))
+        if let unlinkSymlinkResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_UNLINK.rawValue, payload: unlinkSymlinkPayload) {
+            let status = unlinkSymlinkResp.readInt32(at: 0)
+            print("Cleanup: Unlink test_symlink returned \(status)")
+        }
         
         // rmdir test_dir
         var rmdirPayload = Data()
