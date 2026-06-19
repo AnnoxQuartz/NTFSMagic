@@ -20,6 +20,8 @@ extract: download
 	@if [ ! -d $(SRC_DIR) ]; then \
 		echo "Extracting NTFS-3G tarball..."; \
 		tar -xf $(NTFS3G_TARBALL); \
+		echo "Applying macOS build patch..."; \
+		python3 patch_makefile.py $(SRC_DIR)/libntfs-3g/Makefile.in; \
 	fi
 
 configure: extract
