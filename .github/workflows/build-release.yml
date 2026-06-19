@@ -3,10 +3,9 @@ name: Build and Release
 on:
   push:
     branches: [ main, master ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main, master ]
-  release:
-    types: [created]
 
 jobs:
   build:
@@ -31,10 +30,28 @@ jobs:
           name: NTFSMagic-pkg
           path: NTFSMagic.pkg
 
-      - name: Attach PKG to Release
-        if: github.event_name == 'release'
+      - name: Create and Attach PKG to Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: NTFSMagic.pkg
+          name: NTFS Magic ${{ github.ref_name }}
+          body: |
+            ## NTFS Magic ${{ github.ref_name }}
+            
+            Modern, user-space, kext-less NTFS read-write driver for macOS 15+ (Sequoia) built on top of Apple's FSKit framework and utilizing `libntfs-3g`.
+
+            ### 🚀 Features in this release
+            * **Modern kext-less architecture**: Runs entirely in user-space using Apple's FSKit framework.
+            * **Read/Write support**: Allows writing, deleting, renaming files, and formatting NTFS drives.
+            * **Automated CI/CD**: Pre-compiled package (`NTFSMagic.pkg`) attached automatically.
+            
+            ### ⚠️ Installation Notes
+            Without a paid Apple Developer ID signature, macOS's security manager (`fskitd`) will reject loading the FSKit extension. To use this release system-wide:
+            1. Boot into Recovery Mode and run `csrutil disable` to disable SIP.
+            2. Install the `NTFSMagic.pkg` and open `/Applications/NTFSMagic.app` to register.
+            
+            Alternatively, you can run the helper daemon manually in CLI-only mode without disabling SIP:
+            `sudo /Library/PrivilegedHelperTools/ntfsmagicd`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
