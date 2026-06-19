@@ -44,9 +44,11 @@ jobs:
             
             Modern, user-space, kext-less NTFS read-write driver for macOS 15+ (Sequoia) built on top of Apple's FSKit framework and utilizing `libntfs-3g`.
 
-            ### 🚀 Features in this release
-            * **Modern kext-less architecture**: Runs entirely in user-space using Apple's FSKit framework.
-            * **Read/Write support**: Allows writing, deleting, renaming files, and formatting NTFS drives.
+            ### 🚀 New features and enhancements in v0.2
+            * **Dynamic Disk Size Reporting**: Resolves the hard-coded size reporting. The driver now dynamically queries the target NTFS volume parameters (sector/cluster size, total clusters, and free space) and reports them accurately to Finder and Disk Utility.
+            * **High-Performance Inode Cache**: Introduces a thread-safe LRU inode cache (size 16) in the root helper daemon. This dramatically reduces disk wear and CPU overhead by keeping active files open (e.g., sequential writes now require exactly 1 open instead of hundreds).
+            * **Coherent Directory Modifications**: Fixes the `ENOENT` directory lookup bug during file renames/creates. The daemon now immediately evicts parent directory inodes from the cache after modification, ensuring Finder always gets an up-to-date and consistent directory listing.
+            * **File Synchronization (`sync`)**: Fully maps FSKit's `synchronize` protocol to flush dirty cache entries to disk (`NTFS_MSG_SYNC`).
             * **Automated CI/CD**: Pre-compiled package (`NTFSMagic.pkg`) attached automatically.
             
             ### ⚠️ Installation Notes
