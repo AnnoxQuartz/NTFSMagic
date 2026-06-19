@@ -1,0 +1,25 @@
+# Compiled binaries and bundles
+NTFSMagic.app/
+NTFSMagic.pkg
+pkg_root/
+
+# Intermediate build directories and files
+*/NTFSMagic
+*/NTFSFS
+*/ntfsmagicd
+*/test_ipc
+
+# 3rd-party dependencies build artifacts
+3rdparty/build/
+3rdparty/ntfs-3g_ntfsprogs-*/
+3rdparty/*.tgz
+
+# macOS system files
+.DS_Store
+.dSYM/
+
+# Swift PM / Xcode / local user data
+.build/
+.swiftpm/
+xcuserdata/
+DerivedData/

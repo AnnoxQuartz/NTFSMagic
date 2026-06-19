@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>NTFSFS</string>
+	<key>CFBundleExecutable</key>
+	<string>NTFSFS</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.ntfsmagic.NTFSFS</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>NTFSFS</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.fskit.fsmodule</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>NTFSFileSystem</string>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>FSPersonalities</key>
+			<dict>
+				<key>NTFS</key>
+				<dict>
+					<key>FSName</key>
+					<string>NTFS</string>
+					<key>FSShortName</key>
+					<string>ntfs</string>
+					<key>FSSupportedOutputFormat</key>
+					<string>ntfs</string>
+					<key>FSSupportsSync</key>
+					<true/>
+				</dict>
+			</dict>
+		</dict>
+	</dict>
+</dict>
+</plist>

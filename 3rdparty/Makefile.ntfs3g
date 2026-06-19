@@ -1,0 +1,44 @@
+# Target build directory
+BUILD_DIR = $(shell pwd)/build
+NTFS3G_VERSION = 2022.5.17
+NTFS3G_TARBALL = ntfs-3g_ntfsprogs-$(NTFS3G_VERSION).tgz
+NTFS3G_URL = https://tuxera.com/opensource/$(NTFS3G_TARBALL)
+SRC_DIR = ntfs-3g_ntfsprogs-$(NTFS3G_VERSION)
+
+.PHONY: all clean download extract configure build
+
+all: build
+
+download:
+	@mkdir -p build
+	@if [ ! -f $(NTFS3G_TARBALL) ]; then \
+		echo "Downloading NTFS-3G tarball..."; \
+		curl -L -O $(NTFS3G_URL); \
+	fi
+
+extract: download
+	@if [ ! -d $(SRC_DIR) ]; then \
+		echo "Extracting NTFS-3G tarball..."; \
+		tar -xf $(NTFS3G_TARBALL); \
+	fi
+
+configure: extract
+	@echo "Configuring NTFS-3G..."
+	cd $(SRC_DIR) && \
+	./configure \
+		--prefix=$(BUILD_DIR) \
+		--disable-dependency-tracking \
+		--disable-ldconfig \
+		--enable-static \
+		--disable-shared \
+		--disable-ntfs-3g \
+		--disable-ntfsprogs \
+		CFLAGS="-arch arm64" \
+		LDFLAGS="-arch arm64"
+
+build: configure
+	@echo "Building NTFS-3G..."
+	cd $(SRC_DIR) && make -j$(shell sysctl -n hw.ncpu) && make install
+
+clean:
+	rm -rf $(SRC_DIR) $(BUILD_DIR) $(NTFS3G_TARBALL)

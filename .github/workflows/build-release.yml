@@ -1,0 +1,40 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [created]
+
+jobs:
+  build:
+    name: Build macOS PKG
+    runs-on: macos-15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Compile 3rdparty Dependencies
+        run: |
+          cd 3rdparty
+          make -f Makefile.ntfs3g
+
+      - name: Compile and Package App
+        run: |
+          make pkg
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NTFSMagic-pkg
+          path: NTFSMagic.pkg
+
+      - name: Attach PKG to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: NTFSMagic.pkg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

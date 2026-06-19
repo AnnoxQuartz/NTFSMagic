@@ -1,0 +1,17 @@
+#!/bin/sh
+
+# Set correct permissions on the LaunchDaemon plist
+chown root:wheel /Library/LaunchDaemons/com.ntfsmagic.ntfsmagicd.plist
+chmod 644 /Library/LaunchDaemons/com.ntfsmagic.ntfsmagicd.plist
+
+# Set correct permissions on the helper daemon executable
+chown root:wheel /Library/PrivilegedHelperTools/ntfsmagicd
+chmod 755 /Library/PrivilegedHelperTools/ntfsmagicd
+
+# Unload any running instance first to ensure fresh reload
+launchctl unload /Library/LaunchDaemons/com.ntfsmagic.ntfsmagicd.plist 2>/dev/null || true
+
+# Load the daemon and start the service
+launchctl load -w /Library/LaunchDaemons/com.ntfsmagic.ntfsmagicd.plist
+
+exit 0
