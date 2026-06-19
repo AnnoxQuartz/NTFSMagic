@@ -28,13 +28,13 @@ configure: extract
 	@echo "Configuring NTFS-3G..."
 	cd $(SRC_DIR) && \
 	./configure \
-		--prefix=$(BUILD_DIR) \
+		--prefix="$(BUILD_DIR)" \
 		--disable-dependency-tracking \
 		--disable-ldconfig \
 		--enable-static \
 		--disable-shared \
 		--disable-ntfs-3g \
-		--disable-ntfsprogs \
+		--enable-ntfsprogs \
 		CFLAGS="-arch arm64" \
 		LDFLAGS="-arch arm64"
 

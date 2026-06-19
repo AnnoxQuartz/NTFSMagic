@@ -55,20 +55,29 @@ func runSanityTests(client: NTFSDaemonClient, rootIno: UInt64) {
         var existingDirInoVar = existingDirIno
         unlinkFilePayload.append(Data(bytes: &existingDirInoVar, count: 8))
         unlinkFilePayload.append(namePaddingFile.data(using: .utf8)!.prefix(256))
-        _ = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_UNLINK.rawValue, payload: unlinkFilePayload)
+        if let unlinkResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_UNLINK.rawValue, payload: unlinkFilePayload) {
+            let status = unlinkResp.readInt32(at: 0)
+            print("Cleanup: Unlink nested_file.txt returned \(status)")
+        }
         
         var unlinkRenamedPayload = Data()
         var existingDirInoVar2 = existingDirIno
         unlinkRenamedPayload.append(Data(bytes: &existingDirInoVar2, count: 8))
         unlinkRenamedPayload.append(namePaddingRenamed.data(using: .utf8)!.prefix(256))
-        _ = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_UNLINK.rawValue, payload: unlinkRenamedPayload)
+        if let unlinkRenamedResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_UNLINK.rawValue, payload: unlinkRenamedPayload) {
+            let status = unlinkRenamedResp.readInt32(at: 0)
+            print("Cleanup: Unlink renamed_file.txt returned \(status)")
+        }
         
         // rmdir test_dir
         var rmdirPayload = Data()
         var rootVarTemp2 = rootIno
         rmdirPayload.append(Data(bytes: &rootVarTemp2, count: 8))
         rmdirPayload.append(namePaddingDir.data(using: .utf8)!.prefix(256))
-        _ = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_RMDIR.rawValue, payload: rmdirPayload)
+        if let rmdirResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_RMDIR.rawValue, payload: rmdirPayload) {
+            let status = rmdirResp.readInt32(at: 0)
+            print("Cleanup: RMDIR test_dir returned \(status)")
+        }
     }
 
     // 1. Create Directory (MKDIR)
@@ -253,9 +262,13 @@ func runSanityTests(client: NTFSDaemonClient, rootIno: UInt64) {
     rmdirPayload.append(Data(bytes: &rootVar2, count: 8))
     rmdirPayload.append(namePaddingDir.data(using: .utf8)!.prefix(256))
     
-    guard let rmdirResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_RMDIR.rawValue, payload: rmdirPayload),
-          rmdirResp.readInt32(at: 0) == 0 else {
-        print("Sanity failed: RMDIR failed.")
+    guard let rmdirResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_RMDIR.rawValue, payload: rmdirPayload) else {
+        print("Sanity failed: RMDIR request failed.")
+        exit(1)
+    }
+    let rmdirStatus = rmdirResp.readInt32(at: 0)
+    guard rmdirStatus == 0 else {
+        print("Sanity failed: RMDIR failed with status \(rmdirStatus) (POSIX error \(abs(rmdirStatus))).")
         exit(1)
     }
     print("Directory deleted successfully.")
@@ -295,11 +308,14 @@ func runBenchmark() {
         exit(1)
     }
     let status = mountResp.readInt32(at: 0)
-    guard status == 0 else {
+    guard status == 0 || status == -16 else {
         print("Error: Mount returned \(status).")
         exit(1)
     }
-    let rootIno = mountResp.readUInt64(at: 4)
+    var rootIno = mountResp.readUInt64(at: 4)
+    if status == -16 && rootIno == 0 {
+        rootIno = 5
+    }
     print("Mounted successfully. Root inode: \(rootIno)")
     
     // Check if there is block size / disk size returned

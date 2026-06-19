@@ -16,6 +16,8 @@
 #include <ntfs-3g/unistr.h>
 #include <ntfs-3g/layout.h>
 #include <ntfs-3g/ntfstime.h>
+#include <ntfs-3g/cache.h>
+
 
 #include "ntfsmagicd.h"
 
@@ -144,6 +146,45 @@ static int readdir_callback(void *dirent, const ntfschar *name,
     
     ctx->count++;
     return 0;
+}
+
+static int log_readdir_callback(void *dirent, const ntfschar *name,
+                             const int name_len, const int name_type, const s64 pos,
+                             const MFT_REF mref, const unsigned dt_type)
+{
+    char *utf8_name = NULL;
+    int len = ntfs_ucstombs(name, name_len, &utf8_name, 0);
+    if (len >= 0) {
+        printf("[ntfsmagicd]   - entry: '%s', ino=%llu, type=%u\n", utf8_name, (unsigned long long)MREF(mref), dt_type);
+        free(utf8_name);
+    }
+    return 0;
+}
+
+static void log_directory_entries(ntfs_inode *dir_ni) {
+    s64 pos = 0;
+    printf("[ntfsmagicd] Listing entries for directory ino=%llu:\n", (unsigned long long)dir_ni->mft_no);
+    ntfs_readdir(dir_ni, &pos, NULL, log_readdir_callback);
+}
+
+static int my_lookup_cache_compare(const struct CACHED_GENERIC *cached,
+                                const struct CACHED_GENERIC *wanted)
+{
+    const struct CACHED_LOOKUP *c = (const struct CACHED_LOOKUP*) cached;
+    const struct CACHED_LOOKUP *w = (const struct CACHED_LOOKUP*) wanted;
+    return (!c->name
+            || (c->parent != w->parent)
+            || strcmp(c->name, w->name));
+}
+
+static void lookup_cache_invalidate(ntfs_volume *vol, u64 parent, const char *name) {
+    if (vol && vol->lookup_cache) {
+        struct CACHED_LOOKUP item;
+        item.name = name;
+        item.namesize = strlen(name) + 1;
+        item.parent = parent;
+        ntfs_invalidate_cache(vol->lookup_cache, GENERIC(&item), my_lookup_cache_compare, CACHE_FREE);
+    }
 }
 
 static void handle_client(int client_fd) {
@@ -456,6 +497,7 @@ static void handle_client(int client_fd) {
                             if (!new_ni) {
                                 resp.status = -errno;
                             } else {
+                                lookup_cache_invalidate(g_vol, req->parent_ino, req->name);
                                 resp.status = 0;
                                 resp.ino = new_ni->mft_no;
                                 ntfs_inode_close(new_ni);
@@ -495,6 +537,7 @@ static void handle_client(int client_fd) {
                                 printf("[ntfsmagicd] MKDIR failed: name='%s', errno=%d\n", req->name, errno);
                                 resp.status = -errno;
                             } else {
+                                lookup_cache_invalidate(g_vol, req->parent_ino, req->name);
                                 resp.status = 0;
                                 resp.ino = new_ni->mft_no;
                                 ntfs_inode_close(new_ni);
@@ -523,6 +566,8 @@ static void handle_client(int client_fd) {
                     } else {
                         u64 mref = ntfs_inode_lookup_by_mbsname(dir_ni, req->name);
                         if (mref == (u64)-1) {
+                            printf("[ntfsmagicd] UNLINK: lookup failed for name='%s' in parent %llu\n", req->name, (unsigned long long)req->parent_ino);
+                            log_directory_entries(dir_ni);
                             resp.status = -ENOENT;
                         } else {
                             u64 ino = MREF(mref);
@@ -532,10 +577,12 @@ static void handle_client(int client_fd) {
                             
                             ntfs_inode *ni = ntfs_inode_open(g_vol, ino);
                             if (!ni) {
+                                printf("[ntfsmagicd] UNLINK: ntfs_inode_open(ino=%llu) failed: errno=%d\n", (unsigned long long)ino, errno);
                                 resp.status = -errno;
                             } else {
                                 ntfs_inode *dir_ni_dup = ntfs_inode_open(g_vol, req->parent_ino);
                                 if (!dir_ni_dup) {
+                                    printf("[ntfsmagicd] UNLINK: ntfs_inode_open(parent=%llu) failed: errno=%d\n", (unsigned long long)req->parent_ino, errno);
                                     resp.status = -errno;
                                     ntfs_inode_close(ni);
                                 } else {
@@ -575,6 +622,8 @@ static void handle_client(int client_fd) {
                     } else {
                         u64 mref = ntfs_inode_lookup_by_mbsname(dir_ni, req->name);
                         if (mref == (u64)-1) {
+                            printf("[ntfsmagicd] RMDIR: lookup failed for name='%s' in parent %llu\n", req->name, (unsigned long long)req->parent_ino);
+                            log_directory_entries(dir_ni);
                             resp.status = -ENOENT;
                         } else {
                             u64 ino = MREF(mref);
@@ -584,10 +633,12 @@ static void handle_client(int client_fd) {
                             
                             ntfs_inode *ni = ntfs_inode_open(g_vol, ino);
                             if (!ni) {
+                                printf("[ntfsmagicd] RMDIR: ntfs_inode_open(ino=%llu) failed: errno=%d\n", (unsigned long long)ino, errno);
                                 resp.status = -errno;
                             } else {
                                 ntfs_inode *dir_ni_dup = ntfs_inode_open(g_vol, req->parent_ino);
                                 if (!dir_ni_dup) {
+                                    printf("[ntfsmagicd] RMDIR: ntfs_inode_open(parent=%llu) failed: errno=%d\n", (unsigned long long)req->parent_ino, errno);
                                     resp.status = -errno;
                                     ntfs_inode_close(ni);
                                 } else {
@@ -639,11 +690,13 @@ static void handle_client(int client_fd) {
                             
                             ntfs_inode *ni = ntfs_inode_open(g_vol, ino);
                             if (!ni) {
+                                printf("[ntfsmagicd] RENAME: ntfs_inode_open(ino=%llu) failed: errno=%d\n", (unsigned long long)ino, errno);
                                 resp.status = -errno;
                             } else {
                                 if (req->old_parent_ino == req->new_parent_ino) {
                                     ntfs_inode *dir_ni = ntfs_inode_open(g_vol, req->old_parent_ino);
                                     if (!dir_ni) {
+                                        printf("[ntfsmagicd] RENAME: ntfs_inode_open(old_parent=%llu) failed: errno=%d\n", (unsigned long long)req->old_parent_ino, errno);
                                         resp.status = -errno;
                                         ntfs_inode_close(ni);
                                     } else {
@@ -658,6 +711,7 @@ static void handle_client(int client_fd) {
                                             ntfs_inode_close(ni);
                                             ntfs_inode_close(dir_ni);
                                         } else {
+                                            lookup_cache_invalidate(g_vol, req->new_parent_ino, req->new_name);
                                             ntfschar *old_uname = NULL;
                                             int old_uname_len = ntfs_mbstoucs(req->old_name, &old_uname);
                                             // ntfs_delete closes both ni and dir_ni
@@ -693,6 +747,7 @@ static void handle_client(int client_fd) {
                                             ntfs_inode_close(new_dir_ni);
                                             ntfs_inode_close(old_dir_ni);
                                         } else {
+                                            lookup_cache_invalidate(g_vol, req->new_parent_ino, req->new_name);
                                             ntfschar *old_uname = NULL;
                                             int old_uname_len = ntfs_mbstoucs(req->old_name, &old_uname);
                                             // ntfs_delete closes both ni and old_dir_ni
