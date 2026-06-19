@@ -20,7 +20,8 @@ enum ntfs_msg_type {
     NTFS_MSG_UNLINK,
     NTFS_MSG_RMDIR,
     NTFS_MSG_RENAME,
-    NTFS_MSG_TRUNCATE
+    NTFS_MSG_TRUNCATE,
+    NTFS_MSG_SYNC
 };
 
 struct ntfs_msg_header {
@@ -36,6 +37,9 @@ struct ntfs_msg_mount_req {
 struct ntfs_msg_mount_resp {
     int32_t status;
     uint64_t root_ino;
+    uint32_t block_size;
+    uint64_t total_blocks;
+    uint64_t free_blocks;
 };
 
 struct ntfs_msg_unmount_req {

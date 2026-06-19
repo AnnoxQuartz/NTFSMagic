@@ -14,6 +14,7 @@ enum ntfs_msg_type: UInt32 {
     case NTFS_MSG_RMDIR
     case NTFS_MSG_RENAME
     case NTFS_MSG_TRUNCATE
+    case NTFS_MSG_SYNC
 }
 
 struct ntfs_msg_header {

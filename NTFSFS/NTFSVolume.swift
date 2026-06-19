@@ -14,6 +14,10 @@ class NTFSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations {
     let devicePath: String
     private(set) var isVolumeMounted = false
     
+    private var blockSize: UInt32 = 4096
+    private var totalBlocks: UInt64 = 62500000
+    private var freeBlocks: UInt64 = 50000000
+    
     // MARK: FSVolumePathConfOperations
     var maximumLinkCount: Int { return 1 }
     var maximumNameLength: Int { return 255 }
@@ -39,12 +43,12 @@ class NTFSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations {
     
     var volumeStatistics: FSStatFSResult {
         let stats = FSStatFSResult(fileSystemTypeName: "NTFS")
-        stats.blockSize = 4096
+        stats.blockSize = Int(blockSize)
         stats.ioSize = 65536
-        stats.totalBlocks = 62500000
-        stats.availableBlocks = 50000000
-        stats.freeBlocks = 50000000
-        stats.usedBlocks = 12500000
+        stats.totalBlocks = totalBlocks
+        stats.availableBlocks = freeBlocks
+        stats.freeBlocks = freeBlocks
+        stats.usedBlocks = totalBlocks > freeBlocks ? totalBlocks - freeBlocks : 0
         stats.totalBytes = stats.totalBlocks * UInt64(stats.blockSize)
         stats.freeBytes = stats.freeBlocks * UInt64(stats.blockSize)
         stats.availableBytes = stats.availableBlocks * UInt64(stats.blockSize)
@@ -81,8 +85,15 @@ class NTFSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations {
         }
         
         let rootIno = resp.readUInt64(at: 4)
+        
+        if resp.count >= 32 {
+            self.blockSize = resp.readUInt32(at: 12)
+            self.totalBlocks = resp.readUInt64(at: 16)
+            self.freeBlocks = resp.readUInt64(at: 24)
+        }
+        
         isVolumeMounted = true
-        print("[NTFSVolume] Volume activated successfully. Root Inode: \(rootIno)")
+        print("[NTFSVolume] Volume activated successfully. Root Inode: \(rootIno), Block Size: \(self.blockSize), Total Blocks: \(self.totalBlocks), Free Blocks: \(self.freeBlocks)")
         return NTFSItem(ino: rootIno)
     }
     
@@ -106,6 +117,8 @@ class NTFSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations {
     
     func synchronize(flags: FSSyncFlags) async throws {
         print("[NTFSVolume] synchronize(flags: \(flags.rawValue)) called")
+        let payload = Data(repeating: 0, count: 8)
+        _ = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_SYNC.rawValue, payload: payload)
     }
     
     func reclaimItem(_ item: FSItem) async throws {

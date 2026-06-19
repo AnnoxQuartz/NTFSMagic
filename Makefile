@@ -43,26 +43,26 @@ hostapp:
 
 bundle: ntfsmagicd ntfsfs hostapp
 	@echo "Creating NTFSMagic.app bundle..."
-	mkdir -p $(MACOS_DIR)
-	mkdir -p $(EXTENSIONS_DIR)
-	mkdir -p $(APPEX_MACOS_DIR)
+	mkdir -p "$(MACOS_DIR)"
+	mkdir -p "$(EXTENSIONS_DIR)"
+	mkdir -p "$(APPEX_MACOS_DIR)"
 	
 	# Copy Info.plists
-	cp NTFSMagic/NTFSMagic-Info.plist $(CONTENTS)/Info.plist
-	cp NTFSFS/NTFSFS-Info.plist $(APPEX_CONTENTS)/Info.plist
+	cp NTFSMagic/NTFSMagic-Info.plist "$(CONTENTS)/Info.plist"
+	cp NTFSFS/NTFSFS-Info.plist "$(APPEX_CONTENTS)/Info.plist"
 	
 	# Copy Resources (icons & logos)
-	mkdir -p $(CONTENTS)/Resources
-	cp NTFSMagic/AppIcon.icns $(CONTENTS)/Resources/AppIcon.icns
-	cp NTFSMagic/logo_128.png $(CONTENTS)/Resources/logo.png
+	mkdir -p "$(CONTENTS)/Resources"
+	cp NTFSMagic/AppIcon.icns "$(CONTENTS)/Resources/AppIcon.icns"
+	cp NTFSMagic/logo_128.png "$(CONTENTS)/Resources/logo.png"
 	
 	# Copy executables
-	cp NTFSMagic/NTFSMagic $(MACOS_DIR)/NTFSMagic
-	cp NTFSFS/NTFSFS $(APPEX_MACOS_DIR)/NTFSFS
+	cp NTFSMagic/NTFSMagic "$(MACOS_DIR)/NTFSMagic"
+	cp NTFSFS/NTFSFS "$(APPEX_MACOS_DIR)/NTFSFS"
 	
 	# Ad-hoc sign the bundles
-	codesign --force --sign - $(APPEX_BUNDLE)
-	codesign --force --sign - $(APP_BUNDLE)
+	codesign --force --sign - "$(APPEX_BUNDLE)"
+	codesign --force --sign - "$(APP_BUNDLE)"
 	
 	@echo "Build complete: NTFSMagic.app"
 

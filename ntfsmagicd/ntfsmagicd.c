@@ -22,6 +22,88 @@
 ntfs_volume *g_vol = NULL;
 pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#define INODE_CACHE_SIZE 16
+
+struct cache_entry {
+    uint64_t ino;
+    ntfs_inode *ni;
+    uint64_t last_use;
+};
+
+struct cache_entry g_inode_cache[INODE_CACHE_SIZE];
+uint64_t g_cache_timer = 0;
+
+void cache_init(void) {
+    memset(g_inode_cache, 0, sizeof(g_inode_cache));
+    g_cache_timer = 0;
+}
+
+ntfs_inode *cache_get_inode(uint64_t ino) {
+    g_cache_timer++;
+    // Check if already in cache
+    for (int i = 0; i < INODE_CACHE_SIZE; i++) {
+        if (g_inode_cache[i].ni && g_inode_cache[i].ino == ino) {
+            g_inode_cache[i].last_use = g_cache_timer;
+            return g_inode_cache[i].ni;
+        }
+    }
+    
+    // Find empty slot or LRU slot to evict
+    int target_idx = -1;
+    uint64_t oldest_time = (uint64_t)-1;
+    
+    for (int i = 0; i < INODE_CACHE_SIZE; i++) {
+        if (!g_inode_cache[i].ni) {
+            target_idx = i;
+            break;
+        }
+        if (g_inode_cache[i].last_use < oldest_time) {
+            oldest_time = g_inode_cache[i].last_use;
+            target_idx = i;
+        }
+    }
+    
+    // Evict oldest if necessary
+    if (g_inode_cache[target_idx].ni) {
+        printf("[ntfsmagicd] Inode cache full. Evicting inode %llu\n", (unsigned long long)g_inode_cache[target_idx].ino);
+        ntfs_inode_close(g_inode_cache[target_idx].ni);
+        g_inode_cache[target_idx].ni = NULL;
+        g_inode_cache[target_idx].ino = 0;
+    }
+    
+    // Open new inode
+    ntfs_inode *ni = ntfs_inode_open(g_vol, ino);
+    if (ni) {
+        g_inode_cache[target_idx].ino = ino;
+        g_inode_cache[target_idx].ni = ni;
+        g_inode_cache[target_idx].last_use = g_cache_timer;
+    }
+    return ni;
+}
+
+void cache_evict(uint64_t ino) {
+    for (int i = 0; i < INODE_CACHE_SIZE; i++) {
+        if (g_inode_cache[i].ni && g_inode_cache[i].ino == ino) {
+            printf("[ntfsmagicd] Evicting inode %llu from cache\n", (unsigned long long)ino);
+            ntfs_inode_close(g_inode_cache[i].ni);
+            g_inode_cache[i].ni = NULL;
+            g_inode_cache[i].ino = 0;
+            break;
+        }
+    }
+}
+
+void cache_close_all(void) {
+    printf("[ntfsmagicd] Closing all cached inodes...\n");
+    for (int i = 0; i < INODE_CACHE_SIZE; i++) {
+        if (g_inode_cache[i].ni) {
+            ntfs_inode_close(g_inode_cache[i].ni);
+            g_inode_cache[i].ni = NULL;
+            g_inode_cache[i].ino = 0;
+        }
+    }
+}
+
 struct readdir_ctx {
     struct ntfs_dirent *entries;
     int max_entries;
@@ -96,6 +178,7 @@ static void handle_client(int client_fd) {
         if (hdr.type == NTFS_MSG_MOUNT) {
             struct ntfs_msg_mount_req *req = (struct ntfs_msg_mount_req *)payload;
             struct ntfs_msg_mount_resp resp;
+            memset(&resp, 0, sizeof(resp));
             resp.status = 0;
             resp.root_ino = 0;
             
@@ -110,7 +193,19 @@ static void handle_client(int client_fd) {
                 } else {
                     g_vol = vol;
                     resp.root_ino = 5; // NTFS Root directory is MFT 5
-                    printf("[ntfsmagicd] Mount successful! Volume name: '%s', Root inode: %lld\n", vol->vol_name ? vol->vol_name : "None", resp.root_ino);
+                    resp.block_size = vol->cluster_size;
+                    resp.total_blocks = vol->nr_clusters;
+                    
+                    if (ntfs_volume_get_free_space(vol) < 0) {
+                        resp.free_blocks = vol->free_clusters >= 0 ? vol->free_clusters : vol->nr_clusters / 2;
+                    } else {
+                        resp.free_blocks = vol->free_clusters;
+                    }
+                    
+                    cache_init();
+                    
+                    printf("[ntfsmagicd] Mount successful! Volume name: '%s', Root inode: %lld, Block size: %u, Total blocks: %lld, Free blocks: %lld\n",
+                           vol->vol_name ? vol->vol_name : "None", (long long)resp.root_ino, resp.block_size, (long long)resp.total_blocks, (long long)resp.free_blocks);
                 }
             }
             
@@ -130,6 +225,7 @@ static void handle_client(int client_fd) {
                 resp.status = -EINVAL;
             } else {
                 printf("[ntfsmagicd] Unmounting device\n");
+                cache_close_all();
                 int r = ntfs_umount(g_vol, FALSE);
                 if (r < 0) {
                     resp.status = -errno;
@@ -169,7 +265,7 @@ static void handle_client(int client_fd) {
                     struct ntfs_msg_getattr_resp resp;
                     memset(&resp, 0, sizeof(resp));
                     
-                    ntfs_inode *ni = ntfs_inode_open(g_vol, req->ino);
+                    ntfs_inode *ni = cache_get_inode(req->ino);
                     if (!ni) {
                         resp.status = -errno;
                     } else {
@@ -188,8 +284,6 @@ static void handle_client(int client_fd) {
                         resp.mtime = ntfs2timespec(ni->last_data_change_time).tv_sec;
                         resp.ctime = ntfs2timespec(ni->last_mft_change_time).tv_sec;
                         resp.atime = ntfs2timespec(ni->last_access_time).tv_sec;
-                        
-                        ntfs_inode_close(ni);
                     }
                     
                     struct ntfs_msg_header resp_hdr;
@@ -206,18 +300,17 @@ static void handle_client(int client_fd) {
                     struct ntfs_msg_lookup_resp resp;
                     memset(&resp, 0, sizeof(resp));
                     
-                    ntfs_inode *dir_ni = ntfs_inode_open(g_vol, req->parent_ino);
+                    ntfs_inode *dir_ni = cache_get_inode(req->parent_ino);
                     if (!dir_ni) {
                         resp.status = -errno;
                     } else {
                         u64 mref = ntfs_inode_lookup_by_mbsname(dir_ni, req->name);
-                        ntfs_inode_close(dir_ni);
                         
                         if (mref == (u64)-1) {
                             resp.status = -ENOENT;
                         } else {
                             u64 ino = MREF(mref);
-                            ntfs_inode *ni = ntfs_inode_open(g_vol, ino);
+                            ntfs_inode *ni = cache_get_inode(ino);
                             if (!ni) {
                                 resp.status = -errno;
                             } else {
@@ -231,7 +324,6 @@ static void handle_client(int client_fd) {
                                 } else {
                                     resp.mode = S_IFREG | 0777;
                                 }
-                                ntfs_inode_close(ni);
                             }
                         }
                     }
@@ -250,7 +342,7 @@ static void handle_client(int client_fd) {
                     struct ntfs_msg_readdir_resp resp;
                     memset(&resp, 0, sizeof(resp));
                     
-                    ntfs_inode *dir_ni = ntfs_inode_open(g_vol, req->ino);
+                    ntfs_inode *dir_ni = cache_get_inode(req->ino);
                     if (!dir_ni) {
                         resp.status = -errno;
                     } else {
@@ -261,7 +353,6 @@ static void handle_client(int client_fd) {
                         
                         s64 pos = req->offset;
                         int r = ntfs_readdir(dir_ni, &pos, &readdir_ctx, readdir_callback);
-                        ntfs_inode_close(dir_ni);
                         
                         if (r < 0) {
                             resp.status = -errno;
@@ -288,14 +379,13 @@ static void handle_client(int client_fd) {
                     struct ntfs_msg_read_resp *resp = malloc(sizeof(struct ntfs_msg_read_resp) + buf_size);
                     memset(resp, 0, sizeof(struct ntfs_msg_read_resp) + buf_size);
                     
-                    ntfs_inode *ni = ntfs_inode_open(g_vol, req->ino);
+                    ntfs_inode *ni = cache_get_inode(req->ino);
                     if (!ni) {
                         resp->status = -errno;
                         resp->size = 0;
                     } else {
                         // Read unnamed data stream
                         int bytes_read = ntfs_attr_data_read(ni, NULL, 0, resp->data, buf_size, req->offset);
-                        ntfs_inode_close(ni);
                         
                         if (bytes_read < 0) {
                             resp->status = -errno;
@@ -321,12 +411,11 @@ static void handle_client(int client_fd) {
                     struct ntfs_msg_write_resp resp;
                     memset(&resp, 0, sizeof(resp));
                     
-                    ntfs_inode *ni = ntfs_inode_open(g_vol, req->ino);
+                    ntfs_inode *ni = cache_get_inode(req->ino);
                     if (!ni) {
                         resp.status = -errno;
                     } else {
                         int bytes_written = ntfs_attr_data_write(ni, NULL, 0, req->data, req->size, req->offset);
-                        ntfs_inode_close(ni);
                         
                         if (bytes_written < 0) {
                             resp.status = -errno;
@@ -351,7 +440,7 @@ static void handle_client(int client_fd) {
                     struct ntfs_msg_create_resp resp;
                     memset(&resp, 0, sizeof(resp));
                     
-                    ntfs_inode *dir_ni = ntfs_inode_open(g_vol, req->parent_ino);
+                    ntfs_inode *dir_ni = cache_get_inode(req->parent_ino);
                     if (!dir_ni) {
                         resp.status = -errno;
                     } else {
@@ -372,7 +461,7 @@ static void handle_client(int client_fd) {
                                 ntfs_inode_close(new_ni);
                             }
                         }
-                        ntfs_inode_close(dir_ni);
+                        cache_evict(req->parent_ino);
                     }
                     
                     struct ntfs_msg_header resp_hdr;
@@ -389,7 +478,7 @@ static void handle_client(int client_fd) {
                     struct ntfs_msg_mkdir_resp resp;
                     memset(&resp, 0, sizeof(resp));
                     
-                    ntfs_inode *dir_ni = ntfs_inode_open(g_vol, req->parent_ino);
+                    ntfs_inode *dir_ni = cache_get_inode(req->parent_ino);
                     if (!dir_ni) {
                         resp.status = -errno;
                     } else {
@@ -410,7 +499,7 @@ static void handle_client(int client_fd) {
                                 ntfs_inode_close(new_ni);
                             }
                         }
-                        ntfs_inode_close(dir_ni);
+                        cache_evict(req->parent_ino);
                     }
                     
                     struct ntfs_msg_header resp_hdr;
@@ -427,7 +516,7 @@ static void handle_client(int client_fd) {
                     struct ntfs_msg_unlink_resp resp;
                     memset(&resp, 0, sizeof(resp));
                     
-                    ntfs_inode *dir_ni = ntfs_inode_open(g_vol, req->parent_ino);
+                    ntfs_inode *dir_ni = cache_get_inode(req->parent_ino);
                     if (!dir_ni) {
                         resp.status = -errno;
                     } else {
@@ -435,24 +524,32 @@ static void handle_client(int client_fd) {
                         if (mref == (u64)-1) {
                             resp.status = -ENOENT;
                         } else {
-                            ntfs_inode *ni = ntfs_inode_open(g_vol, MREF(mref));
+                            u64 ino = MREF(mref);
+                            cache_evict(ino);
+                            
+                            ntfs_inode *ni = ntfs_inode_open(g_vol, ino);
                             if (!ni) {
                                 resp.status = -errno;
                             } else {
-                                ntfschar *uname = NULL;
-                                int uname_len = ntfs_mbstoucs(req->name, &uname);
-                                int r = ntfs_delete(g_vol, NULL, ni, dir_ni, uname, uname_len);
-                                free(uname);
-                                ntfs_inode_close(ni);
-                                
-                                if (r < 0) {
+                                ntfs_inode *dir_ni_dup = ntfs_inode_open(g_vol, req->parent_ino);
+                                if (!dir_ni_dup) {
                                     resp.status = -errno;
+                                    ntfs_inode_close(ni);
                                 } else {
-                                    resp.status = 0;
+                                    ntfschar *uname = NULL;
+                                    int uname_len = ntfs_mbstoucs(req->name, &uname);
+                                    int r = ntfs_delete(g_vol, NULL, ni, dir_ni_dup, uname, uname_len);
+                                    free(uname);
+                                    
+                                    if (r < 0) {
+                                        resp.status = -errno;
+                                    } else {
+                                        resp.status = 0;
+                                    }
                                 }
                             }
                         }
-                        ntfs_inode_close(dir_ni);
+                        cache_evict(req->parent_ino);
                     }
                     
                     struct ntfs_msg_header resp_hdr;
@@ -469,7 +566,7 @@ static void handle_client(int client_fd) {
                     struct ntfs_msg_rmdir_resp resp;
                     memset(&resp, 0, sizeof(resp));
                     
-                    ntfs_inode *dir_ni = ntfs_inode_open(g_vol, req->parent_ino);
+                    ntfs_inode *dir_ni = cache_get_inode(req->parent_ino);
                     if (!dir_ni) {
                         resp.status = -errno;
                     } else {
@@ -477,24 +574,32 @@ static void handle_client(int client_fd) {
                         if (mref == (u64)-1) {
                             resp.status = -ENOENT;
                         } else {
-                            ntfs_inode *ni = ntfs_inode_open(g_vol, MREF(mref));
+                            u64 ino = MREF(mref);
+                            cache_evict(ino);
+                            
+                            ntfs_inode *ni = ntfs_inode_open(g_vol, ino);
                             if (!ni) {
                                 resp.status = -errno;
                             } else {
-                                ntfschar *uname = NULL;
-                                int uname_len = ntfs_mbstoucs(req->name, &uname);
-                                int r = ntfs_delete(g_vol, NULL, ni, dir_ni, uname, uname_len);
-                                free(uname);
-                                ntfs_inode_close(ni);
-                                
-                                if (r < 0) {
+                                ntfs_inode *dir_ni_dup = ntfs_inode_open(g_vol, req->parent_ino);
+                                if (!dir_ni_dup) {
                                     resp.status = -errno;
+                                    ntfs_inode_close(ni);
                                 } else {
-                                    resp.status = 0;
+                                    ntfschar *uname = NULL;
+                                    int uname_len = ntfs_mbstoucs(req->name, &uname);
+                                    int r = ntfs_delete(g_vol, NULL, ni, dir_ni_dup, uname, uname_len);
+                                    free(uname);
+                                    
+                                    if (r < 0) {
+                                        resp.status = -errno;
+                                    } else {
+                                        resp.status = 0;
+                                    }
                                 }
                             }
                         }
-                        ntfs_inode_close(dir_ni);
+                        cache_evict(req->parent_ino);
                     }
                     
                     struct ntfs_msg_header resp_hdr;
@@ -511,49 +616,54 @@ static void handle_client(int client_fd) {
                     struct ntfs_msg_rename_resp resp;
                     memset(&resp, 0, sizeof(resp));
                     
-                    ntfs_inode *old_dir_ni = ntfs_inode_open(g_vol, req->old_parent_ino);
-                    ntfs_inode *new_dir_ni = ntfs_inode_open(g_vol, req->new_parent_ino);
+                    ntfs_inode *old_dir_ni = cache_get_inode(req->old_parent_ino);
+                    ntfs_inode *new_dir_ni = cache_get_inode(req->new_parent_ino);
                     
                     if (!old_dir_ni || !new_dir_ni) {
                         resp.status = -errno;
-                        if (old_dir_ni) ntfs_inode_close(old_dir_ni);
-                        if (new_dir_ni) ntfs_inode_close(new_dir_ni);
                     } else {
                         u64 mref = ntfs_inode_lookup_by_mbsname(old_dir_ni, req->old_name);
                         if (mref == (u64)-1) {
                             resp.status = -ENOENT;
                         } else {
-                            ntfs_inode *ni = ntfs_inode_open(g_vol, MREF(mref));
+                            u64 ino = MREF(mref);
+                            cache_evict(ino);
+                            
+                            ntfs_inode *ni = ntfs_inode_open(g_vol, ino);
                             if (!ni) {
                                 resp.status = -errno;
                             } else {
                                 ntfschar *new_uname = NULL;
                                 int new_uname_len = ntfs_mbstoucs(req->new_name, &new_uname);
                                 
-                                // Create hard link at the destination
                                 int r = ntfs_link(ni, new_dir_ni, new_uname, new_uname_len);
                                 free(new_uname);
                                 
                                 if (r < 0) {
                                     resp.status = -errno;
+                                    ntfs_inode_close(ni);
                                 } else {
-                                    // Remove old directory entry
-                                    ntfschar *old_uname = NULL;
-                                    int old_uname_len = ntfs_mbstoucs(req->old_name, &old_uname);
-                                    r = ntfs_delete(g_vol, NULL, ni, old_dir_ni, old_uname, old_uname_len);
-                                    free(old_uname);
-                                    
-                                    if (r < 0) {
+                                    ntfs_inode *old_dir_ni_dup = ntfs_inode_open(g_vol, req->old_parent_ino);
+                                    if (!old_dir_ni_dup) {
                                         resp.status = -errno;
+                                        ntfs_inode_close(ni);
                                     } else {
-                                        resp.status = 0;
+                                        ntfschar *old_uname = NULL;
+                                        int old_uname_len = ntfs_mbstoucs(req->old_name, &old_uname);
+                                        r = ntfs_delete(g_vol, NULL, ni, old_dir_ni_dup, old_uname, old_uname_len);
+                                        free(old_uname);
+                                        
+                                        if (r < 0) {
+                                            resp.status = -errno;
+                                        } else {
+                                            resp.status = 0;
+                                        }
                                     }
                                 }
-                                ntfs_inode_close(ni);
                             }
                         }
-                        ntfs_inode_close(old_dir_ni);
-                        ntfs_inode_close(new_dir_ni);
+                        cache_evict(req->old_parent_ino);
+                        cache_evict(req->new_parent_ino);
                     }
                     
                     struct ntfs_msg_header resp_hdr;
@@ -570,11 +680,10 @@ static void handle_client(int client_fd) {
                     struct ntfs_msg_truncate_resp resp;
                     memset(&resp, 0, sizeof(resp));
                     
-                    ntfs_inode *ni = ntfs_inode_open(g_vol, req->ino);
+                    ntfs_inode *ni = cache_get_inode(req->ino);
                     if (!ni) {
                         resp.status = -errno;
                     } else {
-                        // Open attribute to truncate
                         ntfs_attr *na = ntfs_attr_open(ni, AT_DATA, NULL, 0);
                         if (!na) {
                             resp.status = -errno;
@@ -582,12 +691,11 @@ static void handle_client(int client_fd) {
                             int r = ntfs_attr_truncate(na, req->size);
                             ntfs_attr_close(na);
                             if (r < 0) {
-                                resp.status = -errno;
+                                    resp.status = -errno;
                             } else {
                                 resp.status = 0;
                             }
                         }
-                        ntfs_inode_close(ni);
                     }
                     
                     struct ntfs_msg_header resp_hdr;
@@ -597,6 +705,19 @@ static void handle_client(int client_fd) {
                     
                     write(client_fd, &resp_hdr, sizeof(resp_hdr));
                     write(client_fd, &resp, sizeof(resp));
+                    break;
+                }
+                case NTFS_MSG_SYNC: {
+                    cache_close_all();
+                    
+                    struct ntfs_msg_header resp_hdr;
+                    int32_t status = 0;
+                    resp_hdr.length = sizeof(resp_hdr) + sizeof(status);
+                    resp_hdr.type = NTFS_MSG_SYNC;
+                    resp_hdr.request_id = hdr.request_id;
+                    
+                    write(client_fd, &resp_hdr, sizeof(resp_hdr));
+                    write(client_fd, &status, sizeof(status));
                     break;
                 }
                 default:
