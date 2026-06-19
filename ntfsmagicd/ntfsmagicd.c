@@ -525,7 +525,9 @@ static void handle_client(int client_fd) {
                             resp.status = -ENOENT;
                         } else {
                             u64 ino = MREF(mref);
+                            // Evict both target and parent directory before opening duplicate handles
                             cache_evict(ino);
+                            cache_evict(req->parent_ino);
                             
                             ntfs_inode *ni = ntfs_inode_open(g_vol, ino);
                             if (!ni) {
@@ -549,7 +551,6 @@ static void handle_client(int client_fd) {
                                 }
                             }
                         }
-                        cache_evict(req->parent_ino);
                     }
                     
                     struct ntfs_msg_header resp_hdr;
@@ -575,7 +576,9 @@ static void handle_client(int client_fd) {
                             resp.status = -ENOENT;
                         } else {
                             u64 ino = MREF(mref);
+                            // Evict both target and parent directory before opening duplicate handles
                             cache_evict(ino);
+                            cache_evict(req->parent_ino);
                             
                             ntfs_inode *ni = ntfs_inode_open(g_vol, ino);
                             if (!ni) {
@@ -599,7 +602,6 @@ static void handle_client(int client_fd) {
                                 }
                             }
                         }
-                        cache_evict(req->parent_ino);
                     }
                     
                     struct ntfs_msg_header resp_hdr;
