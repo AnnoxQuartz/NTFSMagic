@@ -2,7 +2,7 @@ import FSKit
 import Foundation
 
 @objc(NTFSFileSystem)
-class NTFSFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
+class NTFSFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations, FSManageableResourceMaintenanceOperations {
     
     override init() {
         super.init()
@@ -16,7 +16,6 @@ class NTFSFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
         
         print("[NTFSFileSystem] Probing resource: \(blockRes.bsdName)")
-        // Recognize any partition (containing 's') to avoid probing raw disk containers (like disk4)
         if blockRes.bsdName.contains("s") {
             let containerID = FSContainerIdentifier()
             let result = FSProbeResult.recognized(name: "NTFS Volume", containerID: containerID)
@@ -50,5 +49,21 @@ class NTFSFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
         print("[NTFSFileSystem] Unloading resource: \(blockRes.bsdName)")
         replyHandler(nil)
+    }
+    
+    // MARK: FSManageableResourceMaintenanceOperations Conformance
+    
+    func startCheck(task: FSTask, options: FSTaskOptions) throws -> Progress {
+        print("[NTFSFileSystem] startCheck called")
+        let progress = Progress(totalUnitCount: 1)
+        progress.completedUnitCount = 1
+        return progress
+    }
+    
+    func startFormat(task: FSTask, options: FSTaskOptions) throws -> Progress {
+        print("[NTFSFileSystem] startFormat called")
+        let progress = Progress(totalUnitCount: 1)
+        progress.completedUnitCount = 1
+        return progress
     }
 }

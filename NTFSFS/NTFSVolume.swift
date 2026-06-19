@@ -28,7 +28,7 @@ class NTFSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations {
     var supportedVolumeCapabilities: FSVolume.SupportedCapabilities {
         let caps = FSVolume.SupportedCapabilities()
         caps.supportsPersistentObjectIDs = true
-        caps.supportsSymbolicLinks = false
+        caps.supportsSymbolicLinks = true
         caps.supportsHardLinks = false
         caps.supportsJournal = false
         caps.supportsActiveJournal = false
@@ -92,6 +92,14 @@ class NTFSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations {
             self.freeBlocks = resp.readUInt64(at: 24)
         }
         
+        if resp.count >= 160 {
+            let shmPath = resp.readString(at: 32, length: 128)
+            let cleanPath = shmPath.trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+            if !cleanPath.isEmpty {
+                client.setupShm(path: cleanPath)
+            }
+        }
+        
         isVolumeMounted = true
         print("[NTFSVolume] Volume activated successfully. Root Inode: \(rootIno), Block Size: \(self.blockSize), Total Blocks: \(self.totalBlocks), Free Blocks: \(self.freeBlocks)")
         return NTFSItem(ino: rootIno)
@@ -126,7 +134,38 @@ class NTFSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations {
     }
     
     func createSymbolicLink(named name: FSFileName, inDirectory directory: FSItem, attributes: FSItem.SetAttributesRequest, linkContents: FSFileName) async throws -> (FSItem, FSFileName) {
-        throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTSUP), userInfo: nil)
+        let parentIno = (directory as! NTFSItem).ino
+        guard let nameStr = name.string, let linkStr = linkContents.string else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL), userInfo: nil)
+        }
+        
+        var payload = Data()
+        var parentVar = parentIno
+        payload.append(Data(bytes: &parentVar, count: 8))
+        
+        var namePadding = nameStr
+        if namePadding.count < 256 {
+            namePadding = namePadding.padding(toLength: 256, withPad: "\0", startingAt: 0)
+        }
+        payload.append(namePadding.data(using: .utf8)!.prefix(256))
+        
+        var linkPadding = linkStr
+        if linkPadding.count < 1024 {
+            linkPadding = linkPadding.padding(toLength: 1024, withPad: "\0", startingAt: 0)
+        }
+        payload.append(linkPadding.data(using: .utf8)!.prefix(1024))
+        
+        guard let resp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_SYMLINK.rawValue, payload: payload) else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO), userInfo: nil)
+        }
+        
+        let status = resp.readInt32(at: 0)
+        guard status == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(abs(status)), userInfo: nil)
+        }
+        
+        let ino = resp.readUInt64(at: 4)
+        return (NTFSItem(ino: ino), name)
     }
     
     func createLink(to item: FSItem, named name: FSFileName, inDirectory directory: FSItem) async throws -> FSFileName {
@@ -134,7 +173,22 @@ class NTFSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations {
     }
     
     func readSymbolicLink(_ item: FSItem) async throws -> FSFileName {
-        throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTSUP), userInfo: nil)
+        let ino = (item as! NTFSItem).ino
+        var payload = Data()
+        var inoVar = ino
+        payload.append(Data(bytes: &inoVar, count: 8))
+        
+        guard let resp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_READLINK.rawValue, payload: payload) else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO), userInfo: nil)
+        }
+        
+        let status = resp.readInt32(at: 0)
+        guard status == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(abs(status)), userInfo: nil)
+        }
+        
+        let linkStr = resp.readString(at: 4, length: 1024)
+        return FSFileName(string: linkStr)
     }
     
     func lookupItem(named name: FSFileName, inDirectory directory: FSItem) async throws -> (FSItem, FSFileName) {
@@ -400,62 +454,19 @@ class NTFSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations {
     
     func read(from item: FSItem, at offset: off_t, length: Int, into buffer: FSMutableFileDataBuffer) async throws -> Int {
         let ino = (item as! NTFSItem).ino
-        
-        var payload = Data()
-        var inoVar = ino
-        payload.append(Data(bytes: &inoVar, count: 8))
-        var offsetVar = offset
-        payload.append(Data(bytes: &offsetVar, count: 8))
-        var lengthVar = UInt32(length)
-        payload.append(Data(bytes: &lengthVar, count: 4))
-        
-        guard let resp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_READ.rawValue, payload: payload) else {
+        let bytesRead = client.readShm(ino: ino, offset: Int64(offset), length: length, into: buffer)
+        if bytesRead < 0 {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO), userInfo: nil)
         }
-        
-        let status = resp.readInt32(at: 0)
-        guard status == 0 else {
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(abs(status)), userInfo: nil)
-        }
-        
-        let bytesRead = Int(resp.readUInt32(at: 4))
-        if bytesRead > 0 {
-            let dataStartOffset = 8
-            resp.withUnsafeBytes { ptr in
-                let src = ptr.baseAddress!.assumingMemoryBound(to: UInt8.self) + dataStartOffset
-                buffer.withUnsafeMutableBytes { dstPtr in
-                    if let dst = dstPtr.baseAddress {
-                        memcpy(dst, src, bytesRead)
-                    }
-                }
-            }
-        }
-        
         return bytesRead
     }
     
     func write(contents: Data, to item: FSItem, at offset: off_t) async throws -> Int {
         let ino = (item as! NTFSItem).ino
-        
-        var payload = Data()
-        var inoVar = ino
-        payload.append(Data(bytes: &inoVar, count: 8))
-        var offsetVar = offset
-        payload.append(Data(bytes: &offsetVar, count: 8))
-        var sizeVar = UInt32(contents.count)
-        payload.append(Data(bytes: &sizeVar, count: 4))
-        payload.append(contents)
-        
-        guard let resp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_WRITE.rawValue, payload: payload) else {
+        let bytesWritten = client.writeShm(ino: ino, contents: contents, offset: Int64(offset))
+        if bytesWritten < 0 {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO), userInfo: nil)
         }
-        
-        let status = resp.readInt32(at: 0)
-        guard status == 0 else {
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(abs(status)), userInfo: nil)
-        }
-        
-        let bytesWritten = Int(resp.readUInt32(at: 4))
         return bytesWritten
     }
 }

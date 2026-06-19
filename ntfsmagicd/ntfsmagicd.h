@@ -21,7 +21,11 @@ enum ntfs_msg_type {
     NTFS_MSG_RMDIR,
     NTFS_MSG_RENAME,
     NTFS_MSG_TRUNCATE,
-    NTFS_MSG_SYNC
+    NTFS_MSG_SYNC,
+    NTFS_MSG_SYMLINK,
+    NTFS_MSG_READLINK,
+    NTFS_MSG_CHECK,
+    NTFS_MSG_FORMAT
 };
 
 struct ntfs_msg_header {
@@ -40,6 +44,7 @@ struct ntfs_msg_mount_resp {
     uint32_t block_size;
     uint64_t total_blocks;
     uint64_t free_blocks;
+    char shm_path[128];  // Shared memory file path
 };
 
 struct ntfs_msg_unmount_req {
@@ -102,14 +107,14 @@ struct ntfs_msg_read_req {
 struct ntfs_msg_read_resp {
     int32_t status;
     uint32_t size;
-    char data[0]; // followed by dynamic data
+    char data[0]; // followed by dynamic data (fallback if not using shm)
 };
 
 struct ntfs_msg_write_req {
     uint64_t ino;
     uint64_t offset;
     uint32_t size;
-    char data[0];
+    char data[0]; // fallback if not using shm
 };
 
 struct ntfs_msg_write_resp {
@@ -173,6 +178,42 @@ struct ntfs_msg_truncate_req {
 };
 
 struct ntfs_msg_truncate_resp {
+    int32_t status;
+};
+
+struct ntfs_msg_symlink_req {
+    uint64_t parent_ino;
+    char name[256];
+    char link_contents[1024];
+};
+
+struct ntfs_msg_symlink_resp {
+    int32_t status;
+    uint64_t ino;
+};
+
+struct ntfs_msg_readlink_req {
+    uint64_t ino;
+};
+
+struct ntfs_msg_readlink_resp {
+    int32_t status;
+    char link_contents[1024];
+};
+
+struct ntfs_msg_check_req {
+    uint64_t unused;
+};
+
+struct ntfs_msg_check_resp {
+    int32_t status;
+};
+
+struct ntfs_msg_format_req {
+    char label[128];
+};
+
+struct ntfs_msg_format_resp {
     int32_t status;
 };
 

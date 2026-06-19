@@ -123,39 +123,20 @@ func runSanityTests(client: NTFSDaemonClient, rootIno: UInt64) {
     // 3. Write data to nested file (WRITE)
     print("Writing contents to nested file...")
     let contentData = textContent.data(using: .utf8)!
-    var writePayload = Data()
-    var fileInoVar = fileIno
-    writePayload.append(Data(bytes: &fileInoVar, count: 8))
-    var offsetVar = UInt64(0)
-    writePayload.append(Data(bytes: &offsetVar, count: 8))
-    var sizeVar = UInt32(contentData.count)
-    writePayload.append(Data(bytes: &sizeVar, count: 4))
-    writePayload.append(contentData)
-    
-    guard let writeResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_WRITE.rawValue, payload: writePayload),
-          writeResp.readInt32(at: 0) == 0 else {
+    let bytesWritten = client.writeData(ino: fileIno, contents: contentData, offset: 0)
+    guard bytesWritten == contentData.count else {
         print("Sanity failed: WRITE failed.")
         exit(1)
     }
-    print("Successfully wrote \(writeResp.readUInt32(at: 4)) bytes.")
+    print("Successfully wrote \(bytesWritten) bytes.")
     
     // 4. Read data back (READ)
     print("Reading data back...")
-    var readPayload = Data()
-    var fileInoVar2 = fileIno
-    readPayload.append(Data(bytes: &fileInoVar2, count: 8))
-    var offsetVar2 = UInt64(0)
-    readPayload.append(Data(bytes: &offsetVar2, count: 8))
-    var readSizeVar = UInt32(512)
-    readPayload.append(Data(bytes: &readSizeVar, count: 4))
-    
-    guard let readResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_READ.rawValue, payload: readPayload),
-          readResp.readInt32(at: 0) == 0 else {
+    guard let readData = client.readData(ino: fileIno, offset: 0, length: 512) else {
         print("Sanity failed: READ failed.")
         exit(1)
     }
-    let bytesRead = readResp.readUInt32(at: 4)
-    let readText = readResp.readString(at: 8, length: Int(bytesRead))
+    let readText = String(data: readData, encoding: .utf8) ?? ""
     print("Read back content: '\(readText)'")
     guard readText == textContent else {
         print("Sanity failed: Read content doesn't match written content.")
@@ -178,16 +159,14 @@ func runSanityTests(client: NTFSDaemonClient, rootIno: UInt64) {
     
     // Read back after truncate
     print("Reading back after truncate...")
-    guard let readResp2 = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_READ.rawValue, payload: readPayload),
-          readResp2.readInt32(at: 0) == 0 else {
+    guard let readData2 = client.readData(ino: fileIno, offset: 0, length: 512) else {
         print("Sanity failed: READ after truncate failed.")
         exit(1)
     }
-    let bytesRead2 = readResp2.readUInt32(at: 4)
-    let readText2 = readResp2.readString(at: 8, length: Int(bytesRead2))
+    let readText2 = String(data: readData2, encoding: .utf8) ?? ""
     print("Read back content (truncated): '\(readText2)'")
-    guard bytesRead2 == 6 && readText2 == "Sanity" else {
-        print("Sanity failed: Truncated content is '\(readText2)' of size \(bytesRead2), expected 'Sanity' of size 6")
+    guard readData2.count == 6 && readText2 == "Sanity" else {
+        print("Sanity failed: Truncated content is '\(readText2)' of size \(readData2.count), expected 'Sanity' of size 6")
         exit(1)
     }
     
@@ -240,6 +219,67 @@ func runSanityTests(client: NTFSDaemonClient, rootIno: UInt64) {
         print("Sanity failed: Renamed file not found in directory listing.")
         exit(1)
     }
+    // 7b. Symlink and Readlink Test
+    print("Creating symlink 'test_symlink' pointing to '\(renamedFileName)'...")
+    var symlinkPayload = Data()
+    var dirInoVar4 = dirIno
+    symlinkPayload.append(Data(bytes: &dirInoVar4, count: 8))
+    var namePaddingSymlink = "test_symlink"
+    if namePaddingSymlink.count < 256 {
+        namePaddingSymlink = namePaddingSymlink.padding(toLength: 256, withPad: "\0", startingAt: 0)
+    }
+    symlinkPayload.append(namePaddingSymlink.data(using: .utf8)!.prefix(256))
+    
+    var linkTargetPadding = renamedFileName
+    if linkTargetPadding.count < 1024 {
+        linkTargetPadding = linkTargetPadding.padding(toLength: 1024, withPad: "\0", startingAt: 0)
+    }
+    symlinkPayload.append(linkTargetPadding.data(using: .utf8)!.prefix(1024))
+    
+    guard let symlinkResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_SYMLINK.rawValue, payload: symlinkPayload) else {
+        print("Sanity failed: SYMLINK request failed.")
+        exit(1)
+    }
+    let symlinkStatus = symlinkResp.readInt32(at: 0)
+    guard symlinkStatus == 0 else {
+        print("Sanity failed: SYMLINK failed with status \(symlinkStatus).")
+        exit(1)
+    }
+    let symlinkIno = symlinkResp.readUInt64(at: 4)
+    print("Symlink created. Inode: \(symlinkIno)")
+    
+    print("Reading symlink target...")
+    var readlinkPayload = Data()
+    var symlinkInoVar = symlinkIno
+    readlinkPayload.append(Data(bytes: &symlinkInoVar, count: 8))
+    
+    guard let readlinkResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_READLINK.rawValue, payload: readlinkPayload) else {
+        print("Sanity failed: READLINK request failed.")
+        exit(1)
+    }
+    let readlinkStatus = readlinkResp.readInt32(at: 0)
+    guard readlinkStatus == 0 else {
+        print("Sanity failed: READLINK failed with status \(readlinkStatus).")
+        exit(1)
+    }
+    let targetText = readlinkResp.readString(at: 4, length: 1024)
+    print("Readlink target: '\(targetText)'")
+    guard targetText == renamedFileName else {
+        print("Sanity failed: Readlink target '\(targetText)' doesn't match expected '\(renamedFileName)'.")
+        exit(1)
+    }
+    
+    print("Deleting symlink...")
+    var unlinkSymlinkPayload = Data()
+    var dirInoVar5 = dirIno
+    unlinkSymlinkPayload.append(Data(bytes: &dirInoVar5, count: 8))
+    unlinkSymlinkPayload.append(namePaddingSymlink.data(using: .utf8)!.prefix(256))
+    guard let unlinkSymlinkResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_UNLINK.rawValue, payload: unlinkSymlinkPayload),
+          unlinkSymlinkResp.readInt32(at: 0) == 0 else {
+        print("Sanity failed: UNLINK symlink failed.")
+        exit(1)
+    }
+    print("Symlink deleted successfully.")
     
     // 8. Delete file (UNLINK)
     print("Deleting renamed file...")
@@ -318,6 +358,15 @@ func runBenchmark() {
     }
     print("Mounted successfully. Root inode: \(rootIno)")
     
+    if mountResp.count >= 160 {
+        let shmPath = mountResp.readString(at: 32, length: 128)
+        let cleanPath = shmPath.trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+        if !cleanPath.isEmpty {
+            client.setupShm(path: cleanPath)
+            print("Mapped shared memory for test/benchmark: \(cleanPath)")
+        }
+    }
+    
     // Check if there is block size / disk size returned
     if mountResp.count >= 32 {
         let blockSize = mountResp.readUInt32(at: 12)
@@ -382,17 +431,8 @@ func runBenchmark() {
         var offset: UInt64 = 0
         
         for _ in 0..<numChunks {
-            var writePayload = Data()
-            var fileInoVar = fileIno
-            writePayload.append(Data(bytes: &fileInoVar, count: 8))
-            var offsetVar = offset
-            writePayload.append(Data(bytes: &offsetVar, count: 8))
-            var sizeVar = UInt32(chunkSize)
-            writePayload.append(Data(bytes: &sizeVar, count: 4))
-            writePayload.append(randomBuffer)
-            
-            guard let writeResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_WRITE.rawValue, payload: writePayload),
-                  writeResp.readInt32(at: 0) == 0 else {
+            let bytesWritten = client.writeData(ino: fileIno, contents: randomBuffer, offset: Int64(offset))
+            guard bytesWritten == chunkSize else {
                 print("Error during write benchmark at offset \(offset)")
                 exit(1)
             }
@@ -408,16 +448,7 @@ func runBenchmark() {
         offset = 0
         
         for _ in 0..<numChunks {
-            var readPayload = Data()
-            var fileInoVar2 = fileIno
-            readPayload.append(Data(bytes: &fileInoVar2, count: 8))
-            var offsetVar2 = offset
-            readPayload.append(Data(bytes: &offsetVar2, count: 8))
-            var readSizeVar = UInt32(chunkSize)
-            readPayload.append(Data(bytes: &readSizeVar, count: 4))
-            
-            guard let readResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_READ.rawValue, payload: readPayload),
-                  readResp.readInt32(at: 0) == 0 else {
+            guard let _ = client.readData(ino: fileIno, offset: Int64(offset), length: chunkSize) else {
                 print("Error during read benchmark at offset \(offset)")
                 exit(1)
             }

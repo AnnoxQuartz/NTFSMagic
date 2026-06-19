@@ -1,4 +1,5 @@
 import Foundation
+import FSKit
 
 enum ntfs_msg_type: UInt32 {
     case NTFS_MSG_MOUNT = 1
@@ -15,6 +16,10 @@ enum ntfs_msg_type: UInt32 {
     case NTFS_MSG_RENAME
     case NTFS_MSG_TRUNCATE
     case NTFS_MSG_SYNC
+    case NTFS_MSG_SYMLINK
+    case NTFS_MSG_READLINK
+    case NTFS_MSG_CHECK
+    case NTFS_MSG_FORMAT
 }
 
 struct ntfs_msg_header {
@@ -23,11 +28,28 @@ struct ntfs_msg_header {
     var request_id: UInt64
 }
 
+struct ntfs_msg_read_req {
+    var ino: UInt64
+    var offset: UInt64
+    var size: UInt32
+}
+
+struct ntfs_msg_write_req_shm {
+    var ino: UInt64
+    var offset: UInt64
+    var size: UInt32
+}
+
 class NTFSDaemonClient {
     private let socketPath: String
     private var clientFd: Int32 = -1
     private var requestId: UInt64 = 0
     private let lock = NSLock()
+    
+    // Shared Memory variables
+    private var shmPtr: UnsafeMutableRawPointer? = nil
+    private let shmSize: Int = 2 * 1024 * 1024
+    private var shmFd: Int32 = -1
     
     init(socketPath: String = "/tmp/ntfsmagicd.sock") {
         self.socketPath = socketPath
@@ -82,9 +104,44 @@ class NTFSDaemonClient {
     func disconnect() {
         lock.lock()
         defer { lock.unlock() }
+        
+        cleanupShm()
+        
         if clientFd >= 0 {
             close(clientFd)
             clientFd = -1
+        }
+    }
+    
+    func setupShm(path: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        cleanupShm()
+        
+        let fd = Darwin.open(path, O_RDWR)
+        if fd >= 0 {
+            let ptr = mmap(nil, shmSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
+            if ptr != MAP_FAILED {
+                shmPtr = ptr
+                shmFd = fd
+                print("[NTFSDaemonClient] Successfully mapped shared memory: \(path)")
+            } else {
+                Darwin.close(fd)
+            }
+        } else {
+            print("[NTFSDaemonClient] Failed to open shm file: \(path), errno=\(errno)")
+        }
+    }
+    
+    private func cleanupShm() {
+        if let ptr = shmPtr {
+            munmap(ptr, shmSize)
+            shmPtr = nil
+        }
+        if shmFd >= 0 {
+            Darwin.close(shmFd)
+            shmFd = -1
         }
     }
     
@@ -167,6 +224,302 @@ class NTFSDaemonClient {
         }
         
         return respPayload
+    }
+    
+    func readShm(ino: UInt64, offset: Int64, length: Int, into buffer: FSMutableFileDataBuffer) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        guard clientFd >= 0, let shm = shmPtr else {
+            print("[NTFSDaemonClient] SHM not available for read, clientFd=\(clientFd), shmPtr=\(String(describing: shmPtr))")
+            return -1
+        }
+        
+        requestId += 1
+        let reqId = requestId
+        
+        var req = ntfs_msg_read_req(ino: ino, offset: UInt64(offset), size: UInt32(length))
+        let totalLength = UInt32(MemoryLayout<ntfs_msg_header>.size + MemoryLayout<ntfs_msg_read_req>.size)
+        
+        var header = ntfs_msg_header(length: totalLength, type: ntfs_msg_type.NTFS_MSG_READ.rawValue, request_id: reqId)
+        
+        var writeData = Data()
+        writeData.append(Data(bytes: &header, count: MemoryLayout<ntfs_msg_header>.size))
+        writeData.append(Data(bytes: &req, count: MemoryLayout<ntfs_msg_read_req>.size))
+        
+        let bytesWritten = writeData.withUnsafeBytes { ptr in
+            Darwin.write(clientFd, ptr.baseAddress!, writeData.count)
+        }
+        
+        if bytesWritten != writeData.count {
+            return -1
+        }
+        
+        // Read response header
+        var respHeader = ntfs_msg_header(length: 0, type: 0, request_id: 0)
+        var respHeaderData = Data(repeating: 0, count: MemoryLayout<ntfs_msg_header>.size)
+        let bytesRead = respHeaderData.withUnsafeMutableBytes { ptr in
+            Darwin.read(clientFd, ptr.baseAddress!, MemoryLayout<ntfs_msg_header>.size)
+        }
+        
+        if bytesRead != MemoryLayout<ntfs_msg_header>.size {
+            return -1
+        }
+        
+        respHeaderData.withUnsafeBytes { ptr in
+            respHeader = ptr.load(as: ntfs_msg_header.self)
+        }
+        
+        if respHeader.request_id != reqId {
+            return -1
+        }
+        
+        let respPayloadLen = Int(respHeader.length) - MemoryLayout<ntfs_msg_header>.size
+        if respPayloadLen <= 0 {
+            return -1
+        }
+        
+        var respData = Data(repeating: 0, count: respPayloadLen)
+        var totalRead = 0
+        while totalRead < respPayloadLen {
+            let r = respData.withUnsafeMutableBytes { ptr in
+                Darwin.read(clientFd, ptr.baseAddress! + totalRead, respPayloadLen - totalRead)
+            }
+            if r <= 0 { return -1 }
+            totalRead += r
+        }
+        
+        let status = respData.readInt32(at: 0)
+        guard status == 0 else { return -1 }
+        
+        let bytesReadCount = Int(respData.readUInt32(at: 4))
+        if bytesReadCount > 0 {
+            buffer.withUnsafeMutableBytes { dstPtr in
+                if let dst = dstPtr.baseAddress {
+                    memcpy(dst, shm, bytesReadCount)
+                }
+            }
+        }
+        return bytesReadCount
+    }
+    
+    func writeShm(ino: UInt64, contents: Data, offset: Int64) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        guard clientFd >= 0, let shm = shmPtr else {
+            print("[NTFSDaemonClient] SHM not available for write, clientFd=\(clientFd), shmPtr=\(String(describing: shmPtr))")
+            return -1
+        }
+        
+        let writeLength = min(contents.count, shmSize)
+        contents.withUnsafeBytes { srcPtr in
+            if let src = srcPtr.baseAddress {
+                memcpy(shm, src, writeLength)
+            }
+        }
+        
+        requestId += 1
+        let reqId = requestId
+        
+        var req = ntfs_msg_write_req_shm(ino: ino, offset: UInt64(offset), size: UInt32(writeLength))
+        let totalLength = UInt32(MemoryLayout<ntfs_msg_header>.size + MemoryLayout<ntfs_msg_write_req_shm>.size)
+        
+        var header = ntfs_msg_header(length: totalLength, type: ntfs_msg_type.NTFS_MSG_WRITE.rawValue, request_id: reqId)
+        
+        var writeData = Data()
+        writeData.append(Data(bytes: &header, count: MemoryLayout<ntfs_msg_header>.size))
+        writeData.append(Data(bytes: &req, count: MemoryLayout<ntfs_msg_write_req_shm>.size))
+        
+        let bytesWritten = writeData.withUnsafeBytes { ptr in
+            Darwin.write(clientFd, ptr.baseAddress!, writeData.count)
+        }
+        
+        if bytesWritten != writeData.count {
+            return -1
+        }
+        
+        // Read response header
+        var respHeader = ntfs_msg_header(length: 0, type: 0, request_id: 0)
+        var respHeaderData = Data(repeating: 0, count: MemoryLayout<ntfs_msg_header>.size)
+        let bytesRead = respHeaderData.withUnsafeMutableBytes { ptr in
+            Darwin.read(clientFd, ptr.baseAddress!, MemoryLayout<ntfs_msg_header>.size)
+        }
+        
+        if bytesRead != MemoryLayout<ntfs_msg_header>.size {
+            return -1
+        }
+        
+        respHeaderData.withUnsafeBytes { ptr in
+            respHeader = ptr.load(as: ntfs_msg_header.self)
+        }
+        
+        if respHeader.request_id != reqId {
+            return -1
+        }
+        
+        let respPayloadLen = Int(respHeader.length) - MemoryLayout<ntfs_msg_header>.size
+        if respPayloadLen <= 0 {
+            return -1
+        }
+        
+        var respData = Data(repeating: 0, count: respPayloadLen)
+        var totalRead = 0
+        while totalRead < respPayloadLen {
+            let r = respData.withUnsafeMutableBytes { ptr in
+                Darwin.read(clientFd, ptr.baseAddress! + totalRead, respPayloadLen - totalRead)
+            }
+            if r <= 0 { return -1 }
+            totalRead += r
+        }
+        
+        let status = respData.readInt32(at: 0)
+        guard status == 0 else { return -1 }
+        
+        let bytesWrittenCount = Int(respData.readUInt32(at: 4))
+        return bytesWrittenCount
+    }
+    
+    func readData(ino: UInt64, offset: Int64, length: Int) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        guard clientFd >= 0, let shm = shmPtr else { return nil }
+        
+        requestId += 1
+        let reqId = requestId
+        
+        var req = ntfs_msg_read_req(ino: ino, offset: UInt64(offset), size: UInt32(length))
+        let totalLength = UInt32(MemoryLayout<ntfs_msg_header>.size + MemoryLayout<ntfs_msg_read_req>.size)
+        var header = ntfs_msg_header(length: totalLength, type: ntfs_msg_type.NTFS_MSG_READ.rawValue, request_id: reqId)
+        
+        var writeData = Data()
+        writeData.append(Data(bytes: &header, count: MemoryLayout<ntfs_msg_header>.size))
+        writeData.append(Data(bytes: &req, count: MemoryLayout<ntfs_msg_read_req>.size))
+        
+        let bytesWritten = writeData.withUnsafeBytes { ptr in
+            Darwin.write(clientFd, ptr.baseAddress!, writeData.count)
+        }
+        
+        if bytesWritten != writeData.count {
+            return nil
+        }
+        
+        // Read response header
+        var respHeader = ntfs_msg_header(length: 0, type: 0, request_id: 0)
+        var respHeaderData = Data(repeating: 0, count: MemoryLayout<ntfs_msg_header>.size)
+        let bytesRead = respHeaderData.withUnsafeMutableBytes { ptr in
+            Darwin.read(clientFd, ptr.baseAddress!, MemoryLayout<ntfs_msg_header>.size)
+        }
+        
+        if bytesRead != MemoryLayout<ntfs_msg_header>.size {
+            return nil
+        }
+        
+        respHeaderData.withUnsafeBytes { ptr in
+            respHeader = ptr.load(as: ntfs_msg_header.self)
+        }
+        
+        if respHeader.request_id != reqId {
+            return nil
+        }
+        
+        let respPayloadLen = Int(respHeader.length) - MemoryLayout<ntfs_msg_header>.size
+        if respPayloadLen <= 0 {
+            return nil
+        }
+        
+        var respData = Data(repeating: 0, count: respPayloadLen)
+        var totalRead = 0
+        while totalRead < respPayloadLen {
+            let r = respData.withUnsafeMutableBytes { ptr in
+                Darwin.read(clientFd, ptr.baseAddress! + totalRead, respPayloadLen - totalRead)
+            }
+            if r <= 0 { return nil }
+            totalRead += r
+        }
+        
+        let status = respData.readInt32(at: 0)
+        guard status == 0 else { return nil }
+        
+        let bytesReadCount = Int(respData.readUInt32(at: 4))
+        if bytesReadCount > 0 {
+            return Data(bytes: shm, count: bytesReadCount)
+        }
+        return Data()
+    }
+    
+    func writeData(ino: UInt64, contents: Data, offset: Int64) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        guard clientFd >= 0, let shm = shmPtr else { return -1 }
+        
+        let writeLength = min(contents.count, shmSize)
+        contents.withUnsafeBytes { srcPtr in
+            if let src = srcPtr.baseAddress {
+                memcpy(shm, src, writeLength)
+            }
+        }
+        
+        requestId += 1
+        let reqId = requestId
+        
+        var req = ntfs_msg_write_req_shm(ino: ino, offset: UInt64(offset), size: UInt32(writeLength))
+        let totalLength = UInt32(MemoryLayout<ntfs_msg_header>.size + MemoryLayout<ntfs_msg_write_req_shm>.size)
+        var header = ntfs_msg_header(length: totalLength, type: ntfs_msg_type.NTFS_MSG_WRITE.rawValue, request_id: reqId)
+        
+        var writeData = Data()
+        writeData.append(Data(bytes: &header, count: MemoryLayout<ntfs_msg_header>.size))
+        writeData.append(Data(bytes: &req, count: MemoryLayout<ntfs_msg_write_req_shm>.size))
+        
+        let bytesWritten = writeData.withUnsafeBytes { ptr in
+            Darwin.write(clientFd, ptr.baseAddress!, writeData.count)
+        }
+        
+        if bytesWritten != writeData.count {
+            return -1
+        }
+        
+        // Read response header
+        var respHeader = ntfs_msg_header(length: 0, type: 0, request_id: 0)
+        var respHeaderData = Data(repeating: 0, count: MemoryLayout<ntfs_msg_header>.size)
+        let bytesRead = respHeaderData.withUnsafeMutableBytes { ptr in
+            Darwin.read(clientFd, ptr.baseAddress!, MemoryLayout<ntfs_msg_header>.size)
+        }
+        
+        if bytesRead != MemoryLayout<ntfs_msg_header>.size {
+            return -1
+        }
+        
+        respHeaderData.withUnsafeBytes { ptr in
+            respHeader = ptr.load(as: ntfs_msg_header.self)
+        }
+        
+        if respHeader.request_id != reqId {
+            return -1
+        }
+        
+        let respPayloadLen = Int(respHeader.length) - MemoryLayout<ntfs_msg_header>.size
+        if respPayloadLen <= 0 {
+            return -1
+        }
+        
+        var respData = Data(repeating: 0, count: respPayloadLen)
+        var totalRead = 0
+        while totalRead < respPayloadLen {
+            let r = respData.withUnsafeMutableBytes { ptr in
+                Darwin.read(clientFd, ptr.baseAddress! + totalRead, respPayloadLen - totalRead)
+            }
+            if r <= 0 { return -1 }
+            totalRead += r
+        }
+        
+        let status = respData.readInt32(at: 0)
+        guard status == 0 else { return -1 }
+        
+        let bytesWrittenCount = Int(respData.readUInt32(at: 4))
+        return bytesWrittenCount
     }
 }
 
