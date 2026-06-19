@@ -545,6 +545,7 @@ static void handle_client(int client_fd) {
                                     free(uname);
                                     
                                     if (r < 0) {
+                                        printf("[ntfsmagicd] UNLINK failed: name='%s', errno=%d\n", req->name, errno);
                                         resp.status = -errno;
                                     } else {
                                         resp.status = 0;
@@ -596,6 +597,7 @@ static void handle_client(int client_fd) {
                                     free(uname);
                                     
                                     if (r < 0) {
+                                        printf("[ntfsmagicd] RMDIR failed: name='%s', errno=%d\n", req->name, errno);
                                         resp.status = -errno;
                                     } else {
                                         resp.status = 0;
