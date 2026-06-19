@@ -33,6 +33,23 @@ func runSanityTests(client: NTFSDaemonClient, rootIno: UInt64) {
         let existingDirIno = lookupDirResp.readUInt64(at: 4)
         print("Cleaning up old 'test_dir' (inode \(existingDirIno)) from previous run...")
         
+        // Read directory entries for diagnostics
+        var readdirPayload = Data()
+        var existingDirInoVarTemp = existingDirIno
+        readdirPayload.append(Data(bytes: &existingDirInoVarTemp, count: 8))
+        var offsetVarTemp = UInt64(0)
+        readdirPayload.append(Data(bytes: &offsetVarTemp, count: 8))
+        if let readdirResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_READDIR.rawValue, payload: readdirPayload),
+           readdirResp.readInt32(at: 0) == 0 {
+            let count = readdirResp.readUInt32(at: 4)
+            print("Cleanup: 'test_dir' contains \(count) entries:")
+            for i in 0..<Int(count) {
+                let offsetBase = 8 + i * 268
+                let entryName = readdirResp.readString(at: offsetBase + 12, length: 256)
+                print(" - \(entryName)")
+            }
+        }
+        
         // Try to unlink both files just in case
         var unlinkFilePayload = Data()
         var existingDirInoVar = existingDirIno
