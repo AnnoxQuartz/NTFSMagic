@@ -61,9 +61,13 @@ func runSanityTests(client: NTFSDaemonClient, rootIno: UInt64) {
     mkdirPayload.append(Data(bytes: &rootVar, count: 8))
     mkdirPayload.append(namePaddingDir.data(using: .utf8)!.prefix(256))
     
-    guard let mkdirResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_MKDIR.rawValue, payload: mkdirPayload),
-          mkdirResp.readInt32(at: 0) == 0 else {
-        print("Sanity failed: MKDIR failed.")
+    guard let mkdirResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_MKDIR.rawValue, payload: mkdirPayload) else {
+        print("Sanity failed: MKDIR request failed.")
+        exit(1)
+    }
+    let mkdirStatus = mkdirResp.readInt32(at: 0)
+    guard mkdirStatus == 0 else {
+        print("Sanity failed: MKDIR failed with status \(mkdirStatus) (POSIX error \(abs(mkdirStatus))).")
         exit(1)
     }
     let dirIno = mkdirResp.readUInt64(at: 4)
@@ -78,9 +82,13 @@ func runSanityTests(client: NTFSDaemonClient, rootIno: UInt64) {
     createPayload.append(Data(bytes: &modeVar, count: 4))
     createPayload.append(namePaddingFile.data(using: .utf8)!.prefix(256))
     
-    guard let createResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_CREATE.rawValue, payload: createPayload),
-          createResp.readInt32(at: 0) == 0 else {
-        print("Sanity failed: CREATE failed.")
+    guard let createResp = client.sendRequest(type: ntfs_msg_type.NTFS_MSG_CREATE.rawValue, payload: createPayload) else {
+        print("Sanity failed: CREATE request failed.")
+        exit(1)
+    }
+    let createStatus = createResp.readInt32(at: 0)
+    guard createStatus == 0 else {
+        print("Sanity failed: CREATE failed with status \(createStatus) (POSIX error \(abs(createStatus))).")
         exit(1)
     }
     let fileIno = createResp.readUInt64(at: 4)

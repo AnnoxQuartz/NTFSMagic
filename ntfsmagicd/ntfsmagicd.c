@@ -492,6 +492,7 @@ static void handle_client(int client_fd) {
                             free(uname);
                             
                             if (!new_ni) {
+                                printf("[ntfsmagicd] MKDIR failed: name='%s', errno=%d\n", req->name, errno);
                                 resp.status = -errno;
                             } else {
                                 resp.status = 0;
